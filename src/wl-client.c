@@ -16,6 +16,8 @@
 
 #include "xdg-shell-client-protocol.h"
 #include "wayland-client-protocol.h"
+#include "fractional-scale-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 
 #include <wayland-client-core.h>
 #include <wayland-util.h>
@@ -24,7 +26,6 @@
 #include <xkbcommon/xkbcommon.h>
 #include <xkbcommon/xkbcommon-compose.h>
 
-// TODO: [FRACTIONAL_SCALING] Every calculation that uses scaling will have to change when fractional scaling is introduced.
 // TODO: [ALPHA_BLENDING] The decoration alpha blending is broken, or possibly not configured; needs investigation.
 // TODO: [VALGRIND] Valgrind is showing a lot of errors, asside from the expected NVIDIA driver errors, which need investigation.
 
@@ -76,6 +77,11 @@ static void window_data_log_dimensions(wlclient_window_data* wdata, wlclient_log
 
 static void apply_window_geometry(wlclient_window_data* wdata);
 static void notify_window_resize(wlclient_window* window, wlclient_window_data* wdata);
+static void window_update_framebuffer_size(wlclient_window_data* wdata);
+static void window_apply_surface_scale(wlclient_window_data* wdata);
+static bool window_apply_scale(wlclient_window_data* wdata, u32 scale_numerator);
+
+static u32 scale_logical_to_pixel(u64 scale_numerator, u32 logical_size);
 
 static u32 content_to_window_width(const wlclient_window_data* wdata, u32 content_width);
 static u32 content_to_window_height(const wlclient_window_data* wdata, u32 content_height);
@@ -89,7 +95,13 @@ static void surface_node_destroy_buffers(wlclient_surface_node* node);
 static void surface_node_destroy_pools(wlclient_surface_node* node);
 static void surface_node_create_buffers(wlclient_surface_node* node, u32 pixel_width, u32 pixel_height);
 static void surface_node_change_pool_size(wlclient_surface_node* node, u32 pixel_width, u32 pixel_height);
-static void surface_node_set_non_transperant_region(wlclient_surface_node* node, u32 pixel_width, u32 pixel_height);
+static void surface_node_set_non_transperant_region(wlclient_surface_node* node, u32 logical_width, u32 logical_height);
+static void surface_node_apply_surface_scale(
+    wlclient_surface_node* node,
+    const wlclient_window_data* wdata,
+    u32 logical_width,
+    u32 logical_height
+);
 static void surface_node_render(wlclient_surface_node* node, wlclient_color color);
 
 static bool decor_is_visible(wlclient_window_data* wdata);
@@ -135,6 +147,7 @@ static void seat_capabilities(void *data, struct wl_seat *wl_seat, u32 capabilit
 static void seat_name(void *data, struct wl_seat *wl_seat, const char *name);
 
 static void surface_preferred_buffer_scale(void* data, struct wl_surface* surface, i32 factor);
+static void fractional_scale_preferred_scale(void* data, struct wp_fractional_scale_v1* fractional_scale, u32 scale);
 static void surface_enter(void *data, struct wl_surface *wl_surface, struct wl_output *output);
 static void surface_leave(void *data, struct wl_surface *wl_surface, struct wl_output *output);
 static void surface_preferred_buffer_transform(void *data, struct wl_surface *wl_surface, u32 transform);
@@ -252,6 +265,8 @@ void wlclient_shutdown(void) {
     if (g_state.compositor) wl_compositor_destroy(g_state.compositor);
     if (g_state.subcompositor) wl_subcompositor_destroy(g_state.subcompositor);
     if (g_state.xdgWmBase) xdg_wm_base_destroy(g_state.xdgWmBase);
+    if (g_state.fractional_scale_manager) wp_fractional_scale_manager_v1_destroy(g_state.fractional_scale_manager);
+    if (g_state.viewporter) wp_viewporter_destroy(g_state.viewporter);
     if (g_state.shm) wl_shm_destroy(g_state.shm);
     if (g_state.registry) wl_registry_destroy(g_state.registry);
 
@@ -318,6 +333,7 @@ wlclient_error_code wlclient_window_create(
         wdata->edge_color = decor_cfg->edge_color;
 
         wdata->scale_factor = 1.f;
+        wdata->scale_numerator = 120;
 
         wdata->content_logical_width = content_width;
         wdata->content_logical_height = content_height;
@@ -325,8 +341,7 @@ wlclient_error_code wlclient_window_create(
         wdata->window_logical_width = content_to_window_width(wdata, wdata->content_logical_width);
         wdata->window_logical_height = content_to_window_height(wdata, wdata->content_logical_height);
 
-        wdata->framebuffer_pixel_width = (u32)wdata->scale_factor * wdata->content_logical_width;
-        wdata->framebuffer_pixel_height = (u32)wdata->scale_factor * wdata->content_logical_height;
+        window_update_framebuffer_size(wdata);
 
         wdata->used = true;
         wdata->csd_hidden = !(wdata->decor_logical_height > 0);
@@ -354,6 +369,27 @@ wlclient_error_code wlclient_window_create(
         };
         ret = wl_surface_add_listener(wdata->surface, &surface_listener, window);
         ENSURE_OR_GOTO_ERR(ret == 0);
+
+        if (g_state.viewporter) {
+            wdata->viewport = wp_viewporter_get_viewport(g_state.viewporter, wdata->surface);
+            ENSURE_OR_GOTO_ERR(wdata->viewport);
+        }
+
+        if (g_state.fractional_scale_manager && g_state.viewporter) {
+            wdata->fractional_scale = wp_fractional_scale_manager_v1_get_fractional_scale(
+                g_state.fractional_scale_manager,
+                wdata->surface
+            );
+            ENSURE_OR_GOTO_ERR(wdata->fractional_scale);
+
+            static const struct wp_fractional_scale_v1_listener fractional_scale_listener = {
+                .preferred_scale = fractional_scale_preferred_scale,
+            };
+            ret = wp_fractional_scale_v1_add_listener(wdata->fractional_scale, &fractional_scale_listener, window);
+            ENSURE_OR_GOTO_ERR(ret == 0);
+        }
+
+        window_apply_surface_scale(wdata);
     }
 
     // Create XDG Surface and TopLevel role.
@@ -399,6 +435,14 @@ wlclient_error_code wlclient_window_create(
             );
             ENSURE_OR_GOTO_ERR(wdata->decor_node.subsurface);
 
+            if (g_state.viewporter) {
+                wdata->decor_node.viewport = wp_viewporter_get_viewport(
+                    g_state.viewporter,
+                    wdata->decor_node.child_surface
+                );
+                ENSURE_OR_GOTO_ERR(wdata->decor_node.viewport);
+            }
+
             decor_update_position(wdata);
         }
 
@@ -416,6 +460,14 @@ wlclient_error_code wlclient_window_create(
                     wdata->surface
                 );
                 ENSURE_OR_GOTO_ERR(wdata->edge_nodes[i].subsurface);
+
+                if (g_state.viewporter) {
+                    wdata->edge_nodes[i].viewport = wp_viewporter_get_viewport(
+                        g_state.viewporter,
+                        wdata->edge_nodes[i].child_surface
+                    );
+                    ENSURE_OR_GOTO_ERR(wdata->edge_nodes[i].viewport);
+                }
             }
 
             edges_update_position(wdata);
@@ -485,8 +537,10 @@ void wlclient_window_hide_decor(wlclient_window* window) {
     wdata->csd_hidden = true;
     wdata->content_logical_width = wdata->window_logical_width;
     wdata->content_logical_height = wdata->window_logical_height;
-    wdata->framebuffer_pixel_width = (u32)wdata->scale_factor * wdata->content_logical_width;
-    wdata->framebuffer_pixel_height = (u32)wdata->scale_factor * wdata->content_logical_height;
+
+    window_update_framebuffer_size(wdata);
+    window_apply_surface_scale(wdata);
+
     apply_window_geometry(wdata);
     decor_hide(wdata);
     edges_hide(wdata);
@@ -517,8 +571,10 @@ void wlclient_window_show_decor(wlclient_window* window) {
     wdata->csd_hidden = false;
     wdata->content_logical_width = window_to_content_width(wdata, wdata->window_logical_width);
     wdata->content_logical_height = window_to_content_height(wdata, wdata->window_logical_height);
-    wdata->framebuffer_pixel_width = (u32)wdata->scale_factor * wdata->content_logical_width;
-    wdata->framebuffer_pixel_height = (u32)wdata->scale_factor * wdata->content_logical_height;
+
+    window_update_framebuffer_size(wdata);
+    window_apply_surface_scale(wdata);
+
     apply_window_geometry(wdata);
     decor_render(wdata);
     edges_render(wdata);
@@ -789,10 +845,6 @@ void _wlclient_set_backend_resize_framebuffer(void (*resize_fb)(const wlclient_w
     g_state.backend_resize_framebuffer = resize_fb;
 }
 
-void _wlclient_set_backend_scale_change(void (*scale_change)(const wlclient_window* window, f32 factor)) {
-    g_state.backend_scale_change = scale_change;
-}
-
 //======================================================================================================================
 // Helper Implementations
 //======================================================================================================================
@@ -812,6 +864,11 @@ static void set_allocator(wlclient_allocator* allocator) {
         g_state.allocator.free = free;
         g_state.allocator.strdup = strdup;
     }
+}
+
+static u32 scale_logical_to_pixel(u64 scale_numerator, u32 logical_size) {
+    u64 scaled = (u64) logical_size * (u64) scale_numerator;
+    return (u32) ((scaled + 60u) / 120u);
 }
 
 static u32 content_to_window_width(const wlclient_window_data* wdata, u32 content_width) {
@@ -996,6 +1053,8 @@ static void window_data_destroy(wlclient_window_data* wdata) {
         surface_node_destroy(&wdata->edge_nodes[i]);
     }
 
+    if (wdata->fractional_scale) wp_fractional_scale_v1_destroy(wdata->fractional_scale);
+    if (wdata->viewport) wp_viewport_destroy(wdata->viewport);
     if (wdata->surface) wl_surface_destroy(wdata->surface);
 
     memset(wdata, 0, sizeof(*wdata));
@@ -1049,6 +1108,39 @@ static void notify_window_resize(wlclient_window* window, wlclient_window_data* 
     }
 }
 
+static void window_update_framebuffer_size(wlclient_window_data* wdata) {
+    wdata->framebuffer_pixel_width = scale_logical_to_pixel(wdata->scale_numerator, wdata->content_logical_width);
+    wdata->framebuffer_pixel_height = scale_logical_to_pixel(wdata->scale_numerator, wdata->content_logical_height);
+}
+
+static void window_apply_surface_scale(wlclient_window_data* wdata) {
+    if (wdata->viewport) {
+        wl_surface_set_buffer_scale(wdata->surface, 1);
+        wp_viewport_set_destination(
+            wdata->viewport,
+            (i32) wdata->content_logical_width,
+            (i32) wdata->content_logical_height
+        );
+        return;
+    }
+
+    i32 buffer_scale = (i32) ((wdata->scale_numerator + 60u) / 120u);
+    wl_surface_set_buffer_scale(wdata->surface, buffer_scale);
+}
+
+static bool window_apply_scale(wlclient_window_data* wdata, u32 scale_numerator) {
+    if (scale_numerator == 0 || wdata->scale_numerator == scale_numerator) {
+        return false;
+    }
+
+    wdata->scale_numerator = scale_numerator;
+    wdata->scale_factor = (f32) scale_numerator / 120.f;
+    window_update_framebuffer_size(wdata);
+    window_apply_surface_scale(wdata);
+
+    return true;
+}
+
 static bool display_flush(struct wl_display* display) {
     bool res = true;
 
@@ -1086,6 +1178,7 @@ static void surface_node_destroy(wlclient_surface_node* node) {
     surface_node_destroy_buffers(node);
     surface_node_destroy_pools(node);
 
+    if (node->viewport) wp_viewport_destroy(node->viewport);
     if (node->subsurface) wl_subsurface_destroy(node->subsurface);
     if (node->child_surface) wl_surface_destroy(node->child_surface);
 }
@@ -1211,13 +1304,29 @@ static void surface_node_change_pool_size(wlclient_surface_node* node, u32 pixel
 }
 
 // Hint to the compositor that the surface region will be non-transparent.
-static void surface_node_set_non_transperant_region(wlclient_surface_node* node, u32 pixel_width, u32 pixel_height) {
+static void surface_node_set_non_transperant_region(wlclient_surface_node* node, u32 logical_width, u32 logical_height) {
     struct wl_region* empty_region = wl_compositor_create_region(g_state.compositor);
     WLCLIENT_PANIC(empty_region, "wl_compositor_create_region failed");
 
-    wl_region_add(empty_region, 0, 0, (i32) pixel_width, (i32) pixel_height);
+    wl_region_add(empty_region, 0, 0, (i32) logical_width, (i32) logical_height);
     wl_surface_set_opaque_region(node->child_surface, empty_region);
     wl_region_destroy(empty_region);
+}
+
+static void surface_node_apply_surface_scale(
+    wlclient_surface_node* node,
+    const wlclient_window_data* wdata,
+    u32 logical_width,
+    u32 logical_height
+) {
+    if (node->viewport) {
+        wl_surface_set_buffer_scale(node->child_surface, 1);
+        wp_viewport_set_destination(node->viewport, (i32) logical_width, (i32) logical_height);
+        return;
+    }
+
+    i32 buffer_scale = (i32) ((wdata->scale_numerator + 60u) / 120u);
+    wl_surface_set_buffer_scale(node->child_surface, buffer_scale);
 }
 
 static void surface_node_render(wlclient_surface_node* node,  wlclient_color color) {
@@ -1272,20 +1381,25 @@ static bool decor_is_visible(wlclient_window_data* wdata) {
 * Position the decoration directly above the main content surface.
 */
 static void decor_update_position(wlclient_window_data* wdata) {
-    i32 decor_height = (i32)wdata->decor_logical_height * (i32)wdata->scale_factor;
-    wl_subsurface_set_position(wdata->decor_node.subsurface, 0, -decor_height);
+    wl_subsurface_set_position(wdata->decor_node.subsurface, 0, -(i32) wdata->decor_logical_height);
 }
 
 static void decor_handle_resize(wlclient_window_data* wdata) {
     if (wdata->decor_logical_height == 0) return;
 
-    u32 new_decor_pixel_width = wdata->content_logical_width * (u32)wdata->scale_factor;
-    u32 new_decor_pixel_height = wdata->decor_logical_height * (u32)wdata->scale_factor;
+    u32 new_decor_pixel_width = scale_logical_to_pixel(wdata->scale_numerator, wdata->content_logical_width);
+    u32 new_decor_pixel_height = scale_logical_to_pixel(wdata->scale_numerator, wdata->decor_logical_height);
 
     bool no_resize_needed = new_decor_pixel_width == wdata->decor_node.pixel_width &&
                             new_decor_pixel_height == wdata->decor_node.pixel_height;
     if (no_resize_needed) {
         // Exactly the same dimensions -- no resize needed
+        surface_node_apply_surface_scale(
+            &wdata->decor_node,
+            wdata,
+            wdata->content_logical_width,
+            wdata->decor_logical_height
+        );
         return;
     }
 
@@ -1295,11 +1409,21 @@ static void decor_handle_resize(wlclient_window_data* wdata) {
     surface_node_destroy_buffers(&wdata->decor_node);
     surface_node_create_buffers(&wdata->decor_node, new_decor_pixel_width, new_decor_pixel_height);
 
-    surface_node_set_non_transperant_region(&wdata->decor_node, new_decor_pixel_width, new_decor_pixel_height);
+    surface_node_set_non_transperant_region(
+        &wdata->decor_node,
+        wdata->content_logical_width,
+        wdata->decor_logical_height
+    );
 
     wdata->decor_node.pixel_width = new_decor_pixel_width;
     wdata->decor_node.pixel_height = new_decor_pixel_height;
 
+    surface_node_apply_surface_scale(
+        &wdata->decor_node,
+        wdata,
+        wdata->content_logical_width,
+        wdata->decor_logical_height
+    );
     decor_update_position(wdata); // might not be necessary
 }
 
@@ -1358,18 +1482,40 @@ static void edges_update_position(wlclient_window_data* wdata) {
 static void edges_handle_resize(wlclient_window_data* wdata) {
     if (wdata->edge_logical_thickness == 0) return;
 
-    u32 edge_thickness = wdata->edge_logical_thickness * (u32)wdata->scale_factor;
-    u32 edge_w = (wdata->content_logical_width + 2 * wdata->edge_logical_thickness) * (u32)wdata->scale_factor;
-    u32 edge_h = (wdata->content_logical_height + wdata->decor_logical_height) * (u32)wdata->scale_factor;
+    u32 edge_thickness = scale_logical_to_pixel(wdata->scale_numerator, wdata->edge_logical_thickness);
+    u32 edge_w = scale_logical_to_pixel(wdata->scale_numerator, wdata->content_logical_width + 2 * wdata->edge_logical_thickness);
+    u32 edge_h = scale_logical_to_pixel(wdata->scale_numerator, wdata->content_logical_height + wdata->decor_logical_height);
 
     struct {
         u32 pixel_width;
         u32 pixel_height;
+        u32 logical_width;
+        u32 logical_height;
     } edge_sizes[] = {
-        [WLCLIENT_EDGE_TOP]    = { .pixel_width = edge_w,         .pixel_height = edge_thickness },
-        [WLCLIENT_EDGE_BOTTOM] = { .pixel_width = edge_w,         .pixel_height = edge_thickness },
-        [WLCLIENT_EDGE_LEFT]   = { .pixel_width = edge_thickness, .pixel_height = edge_h },
-        [WLCLIENT_EDGE_RIGHT]  = { .pixel_width = edge_thickness, .pixel_height = edge_h },
+        [WLCLIENT_EDGE_TOP]    = {
+            .pixel_width = edge_w,
+            .pixel_height = edge_thickness,
+            .logical_width = wdata->content_logical_width + 2 * wdata->edge_logical_thickness,
+            .logical_height = wdata->edge_logical_thickness,
+        },
+        [WLCLIENT_EDGE_BOTTOM] = {
+            .pixel_width = edge_w,
+            .pixel_height = edge_thickness,
+            .logical_width = wdata->content_logical_width + 2 * wdata->edge_logical_thickness,
+            .logical_height = wdata->edge_logical_thickness,
+        },
+        [WLCLIENT_EDGE_LEFT]   = {
+            .pixel_width = edge_thickness,
+            .pixel_height = edge_h,
+            .logical_width = wdata->edge_logical_thickness,
+            .logical_height = wdata->content_logical_height + wdata->decor_logical_height,
+        },
+        [WLCLIENT_EDGE_RIGHT]  = {
+            .pixel_width = edge_thickness,
+            .pixel_height = edge_h,
+            .logical_width = wdata->edge_logical_thickness,
+            .logical_height = wdata->content_logical_height + wdata->decor_logical_height,
+        },
     };
 
     for (u32 i = 0; i < WLCLIENT_EDGE_COUNT; i++) {
@@ -1381,6 +1527,12 @@ static void edges_handle_resize(wlclient_window_data* wdata) {
                                 new_edge_pixel_height == edge_node->pixel_height;
         if (no_resize_needed) {
             // Exactly the same dimensions -- no resize needed
+            surface_node_apply_surface_scale(
+                edge_node,
+                wdata,
+                edge_sizes[i].logical_width,
+                edge_sizes[i].logical_height
+            );
             continue;
         }
 
@@ -1390,10 +1542,21 @@ static void edges_handle_resize(wlclient_window_data* wdata) {
         surface_node_destroy_buffers(edge_node);
         surface_node_create_buffers(edge_node, new_edge_pixel_width, new_edge_pixel_height);
 
-        surface_node_set_non_transperant_region(edge_node, new_edge_pixel_width, new_edge_pixel_height);
+        surface_node_set_non_transperant_region(
+            edge_node,
+            edge_sizes[i].logical_width,
+            edge_sizes[i].logical_height
+        );
 
         edge_node->pixel_width = new_edge_pixel_width;
         edge_node->pixel_height = new_edge_pixel_height;
+
+        surface_node_apply_surface_scale(
+            edge_node,
+            wdata,
+            edge_sizes[i].logical_width,
+            edge_sizes[i].logical_height
+        );
     }
 
     edges_update_position(wdata);
@@ -1595,6 +1758,23 @@ static void register_global(void* data, struct wl_registry* wl_registry, u32 id,
         };
         i32 ret = wl_shm_add_listener(g_state.shm, &listener, NULL);
         WLCLIENT_PANIC(ret == 0, "failed to setup shm format listener");
+    }
+    else if (strcmp(interface, "wp_fractional_scale_manager_v1") == 0) {
+        WLCLIENT_PANIC(!g_state.fractional_scale_manager, "wp_fractional_scale_manager_v1 re-registered");
+        u32 effective_version = WLCLIENT_MIN((u32) wp_fractional_scale_manager_v1_interface.version, version);
+        g_state.fractional_scale_manager = wl_registry_bind(
+            wl_registry,
+            id,
+            &wp_fractional_scale_manager_v1_interface,
+            effective_version
+        );
+        WLCLIENT_PANIC(g_state.fractional_scale_manager, "failed to create wp_fractional_scale_manager_v1");
+    }
+    else if (strcmp(interface, "wp_viewporter") == 0) {
+        WLCLIENT_PANIC(!g_state.viewporter, "wp_viewporter re-registered");
+        u32 effective_version = WLCLIENT_MIN((u32) wp_viewporter_interface.version, version);
+        g_state.viewporter = wl_registry_bind(wl_registry, id, &wp_viewporter_interface, effective_version);
+        WLCLIENT_PANIC(g_state.viewporter, "failed to create wp_viewporter");
     }
     else if (strcmp(interface, "wl_seat") == 0) {
         u32 effective_version = WLCLIENT_MIN((u32) wl_seat_interface.version, version);
@@ -1861,8 +2041,8 @@ static void xdg_surface_configure(void* data, struct xdg_surface* xdg_surface, u
         ? window_to_content_height(wdata, wdata->window_logical_height)
         : wdata->window_logical_height;
 
-    wdata->framebuffer_pixel_width = (u32)wdata->scale_factor * wdata->content_logical_width;
-    wdata->framebuffer_pixel_height = (u32)wdata->scale_factor * wdata->content_logical_height;
+    window_update_framebuffer_size(wdata);
+    window_apply_surface_scale(wdata);
 
     window_data_log_dimensions(wdata, WLCLIENT_LOG_LEVEL_DEBUG, __func__);
 
@@ -2009,8 +2189,8 @@ static void seat_name(void *data, struct wl_seat *wl_seat, const char *name) {
 }
 
 /**
-* This reports the compositor's preferred buffer scale for the surface. The client should render buffers at this
-* scale and advertise it back with wl_surface_set_buffer_scale.
+* This reports the compositor's preferred integer buffer scale for the surface. When fractional scaling is active,
+* wp_fractional_scale_v1 is authoritative and this event is ignored.
 *
 * This happens:
 *   - after the surface becomes associated with outputs
@@ -2022,21 +2202,60 @@ static void seat_name(void *data, struct wl_seat *wl_seat, const char *name) {
 *   factor  - preferred buffer scale for the surface
 */
 static void surface_preferred_buffer_scale(void* data, struct wl_surface* surface, i32 factor) {
+    (void) surface;
+
     wlclient_window* window = data;
     wlclient_window_data* wdata = _wlclient_get_wl_window_data(window);
 
-    WLCLIENT_LOG_DEBUG("Preferred buffer scale: %" PRIi32, factor);
+    if (wdata->fractional_scale) {
+        WLCLIENT_LOG_INFO(
+            "Ignoring preferred buffer scale: %" PRIi32 " because fractional scaling is active",
+            factor
+        );
+        return;
+    }
+    if (factor <= 0) return;
 
-    if ((i32)wdata->scale_factor == factor) return;
+    WLCLIENT_LOG_INFO("Preferred buffer scale: %" PRIi32, factor);
 
-    wdata->scale_factor = (f32)factor;
-    wl_surface_set_buffer_scale(surface, (i32) wdata->scale_factor);
+    bool changed = window_apply_scale(wdata, (u32) factor * 120u);
+    if (!changed) return;
 
-    // Notify backend and user
+    if (decor_is_visible(wdata)) {
+        decor_render(wdata);
+        edges_render(wdata);
+    }
+
+    // Notify user
     {
-        if (g_state.backend_scale_change) {
-            g_state.backend_scale_change(window, wdata->scale_factor);
+        notify_window_resize(window, wdata);
+
+        if (wdata->scale_factor_change_handler) {
+            wdata->scale_factor_change_handler(window, wdata->scale_factor);
         }
+    }
+}
+
+static void fractional_scale_preferred_scale(void* data, struct wp_fractional_scale_v1* fractional_scale, u32 scale) {
+    (void) fractional_scale;
+
+    wlclient_window* window = data;
+    wlclient_window_data* wdata = _wlclient_get_wl_window_data(window);
+
+    WLCLIENT_LOG_INFO("Preferred fractional scale: %" PRIu32 "/120", scale);
+
+    bool changed = window_apply_scale(wdata, scale);
+    if (!changed) return;
+
+    if (decor_is_visible(wdata)) {
+        decor_render(wdata);
+        edges_render(wdata);
+    }
+
+    // Notify user
+    {
+        notify_window_resize(window, wdata);
+
         if (wdata->scale_factor_change_handler) {
             wdata->scale_factor_change_handler(window, wdata->scale_factor);
         }

@@ -200,6 +200,8 @@ typedef struct wlclient_surface_node {
     struct wl_surface* child_surface;
     // Subsurface links the child_surface to the main window surface.
     struct wl_subsurface* subsurface;
+    // Viewport maps integer-sized buffers back to logical surface-local size for fractional scaling.
+    struct wp_viewport* viewport;
     // Shared-memory pool backing all buffers for this surface node.
     struct wl_shm_pool* shm_pool;
     // Buffers attached to child_surface.
@@ -237,9 +239,15 @@ typedef struct wlclient_window_data {
     // Scale factor reported by the compositor. May be fractional.
     // Multiply logical sizes by this value to obtain pixel sizes.
     f32 scale_factor;
+    // Scale factor numerator. The denominator is 120 per wp_fractional_scale_v1.
+    u32 scale_numerator;
 
     // Core main wayland surface — the drawable area that pixel buffers attach to.
     struct wl_surface* surface;
+    // Main surface viewport. Used with fractional scaling to map framebuffer pixels to logical content size.
+    struct wp_viewport* viewport;
+    // Fractional scale object for compositor preferred scale events.
+    struct wp_fractional_scale_v1* fractional_scale;
     // XDG surface role — adds configure/ack lifecycle to the raw surface.
     struct xdg_surface* xdg_surface;
     // XDG toplevel role — makes the surface a desktop window with title, close, resize, etc.
@@ -300,6 +308,10 @@ typedef struct wlclient_global_state {
     struct wl_compositor* compositor;
     // The object exposing sub-surface compositing capabilities. This is needed for the decoration subsurfaces.
     struct wl_subcompositor* subcompositor;
+    // Fractional scale protocol manager. Optional.
+    struct wp_fractional_scale_manager_v1* fractional_scale_manager;
+    // Viewporter protocol manager. Required for fractional-scale buffer destinations. Optional fallback uses integer scale.
+    struct wp_viewporter* viewporter;
 
     // The singleton global object that provides support for shared memory.
     struct wl_shm* shm;
@@ -317,5 +329,4 @@ typedef struct wlclient_global_state {
     void (*backend_shutdown)(void);
     void (*backend_destroy_window)(const wlclient_window* window);
     void (*backend_resize_framebuffer)(const wlclient_window* window, u32 framebuffer_width, u32 framebuffer_height);
-    void (*backend_scale_change)(const wlclient_window* window, f32 factor);
 } wlclient_global_state;

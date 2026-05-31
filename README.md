@@ -45,7 +45,6 @@ Features that are next in the development pipeline:
 | High Priority Feature                        | Status      | Notes       |
 | -------------------------------------------- | ----------- | ----------- |
 | Pointer axis (scroll)                        | In Progress |             |
-| Fractional scaling (`wp-fractional-scale`)   | In Progress |             |
 | Cursor (setting, animating, size changes)    | Planned     |             |
 | Allow window to start in fullscreen          | Planned     |             |
 | Clipboard                                    | Planning    |             |

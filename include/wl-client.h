@@ -58,4 +58,3 @@ WLCLIENT_API_EXPORT wlclient_window_data* _wlclient_get_wl_window_data(const wlc
 WLCLIENT_API_EXPORT void _wlclient_set_backend_shutdown(void (*shutdown)(void));
 WLCLIENT_API_EXPORT void _wlclient_set_backend_window_destroy(void (*destroy_window)(const wlclient_window* window));
 WLCLIENT_API_EXPORT void _wlclient_set_backend_resize_framebuffer(void (*resize_fb)(const wlclient_window* window, u32 framebuffer_width, u32 framebuffer_height));
-WLCLIENT_API_EXPORT void _wlclient_set_backend_scale_change(void (*scale_change)(const wlclient_window* window, f32 factor));

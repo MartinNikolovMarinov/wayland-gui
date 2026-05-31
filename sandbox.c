@@ -40,7 +40,7 @@ void handle_framebuffer_size_change(wlclient_window* window, u32 width, u32 heig
 }
 
 void handle_scale_factor_change(wlclient_window* window, f32 factor) {
-    // printf("USER SPACE: Scale factor change for window (id=%d) to factor=%f \n", window->id, (f64)factor);
+    printf("USER SPACE: Scale factor change for window (id=%d) to factor=%f \n", window->id, (f64)factor);
 }
 
 void handle_mouse_focus(struct wlclient_window* window, bool has_mouse_focus) {
@@ -126,7 +126,7 @@ i32 main(void) {
 
     wlclient_error_code result_code = 0;
 
-    wlclient_log_set_level(WLCLIENT_LOG_LEVEL_INFO);
+    wlclient_log_set_level(WLCLIENT_LOG_LEVEL_DEBUG);
     result_code = wlclient_init(NULL);
     if (result_code != WLCLIENT_ERROR_OK) {
         printf("ERROR - %d\n", result_code);
