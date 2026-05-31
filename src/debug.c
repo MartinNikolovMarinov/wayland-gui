@@ -74,7 +74,8 @@ void _wlclient_log_message(
     const char* format,
     ...
 ) {
-    if (level < g_log_level) {
+#if defined(WLCLIENT_LOG_LEVEL) && WLCLIENT_LOG_LEVEL < 6
+    if (level < WLCLIENT_LOG_LEVEL || level < g_log_level) {
         return;
     }
 
@@ -87,6 +88,11 @@ void _wlclient_log_message(
     va_end(args);
 
     fputc('\n', stdout);
+#else
+    (void) level;
+    (void) function_name;
+    (void) format;
+#endif
 }
 
 void _wlclient_report_wayland_fatal(

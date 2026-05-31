@@ -48,7 +48,27 @@ else()
     log_fatal("Unsupported backend: ${WLCLIENT_BACKEND}")
 endif()
 
-option(WLCLIENT_USE_LOGGING "Use ANSI escape codes in logging." OFF)
+set(WLCLIENT_LOG_LEVEL "MUTE" CACHE STRING "Minimum wlclient log level.")
+set_property(CACHE WLCLIENT_LOG_LEVEL PROPERTY STRINGS TRACE DEBUG INFO WARN ERROR FATAL MUTE)
+
+if(WLCLIENT_LOG_LEVEL STREQUAL "TRACE")
+    set(WLCLIENT_LOG_LEVEL_VALUE 0)
+elseif(WLCLIENT_LOG_LEVEL STREQUAL "DEBUG")
+    set(WLCLIENT_LOG_LEVEL_VALUE 1)
+elseif(WLCLIENT_LOG_LEVEL STREQUAL "INFO")
+    set(WLCLIENT_LOG_LEVEL_VALUE 2)
+elseif(WLCLIENT_LOG_LEVEL STREQUAL "WARN")
+    set(WLCLIENT_LOG_LEVEL_VALUE 3)
+elseif(WLCLIENT_LOG_LEVEL STREQUAL "ERROR")
+    set(WLCLIENT_LOG_LEVEL_VALUE 4)
+elseif(WLCLIENT_LOG_LEVEL STREQUAL "FATAL")
+    set(WLCLIENT_LOG_LEVEL_VALUE 5)
+elseif(WLCLIENT_LOG_LEVEL STREQUAL "MUTE")
+    set(WLCLIENT_LOG_LEVEL_VALUE 6)
+else()
+    log_fatal("Unsupported log level: ${WLCLIENT_LOG_LEVEL}")
+endif()
+
 option(WLCLIENT_LIBRARY_SHARED "Build as shared library." OFF)
 option(WLCLIENT_ASSERT_ENABLED "Enable asserts." OFF)
 option(WLCLIENT_BUILD_SANDBOX "Build sandbox executable." OFF)
@@ -66,7 +86,7 @@ log_info("Debug:             ${WLCLIENT_DEBUG}")
 log_info("Asserts:           ${WLCLIENT_ASSERT_ENABLED}")
 log_info("Shared:            ${WLCLIENT_LIBRARY_SHARED}")
 log_info("Backend:           ${WLCLIENT_BACKEND}")
-log_info("Use logging:       ${WLCLIENT_USE_LOGGING}")
+log_info("Log level:         ${WLCLIENT_LOG_LEVEL} (${WLCLIENT_LOG_LEVEL_VALUE})")
 log_info("Build Sandbox:     ${WLCLIENT_BUILD_SANDBOX}")
 log_info("Build Tests:       ${WLCLIENT_BUILD_TESTS}")
 log_info("---------------------------------------------")
@@ -130,9 +150,9 @@ target_include_directories(${target_wlclient} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/wayland
 )
 target_compile_definitions(${target_wlclient} PUBLIC
-    "WLCLIENT_USE_LOGGING=$<BOOL:${WLCLIENT_USE_LOGGING}>"
     "WLCLIENT_DEBUG=$<BOOL:${WLCLIENT_DEBUG}>"
     "WLCLIENT_ASSERT_ENABLED=$<BOOL:${WLCLIENT_ASSERT_ENABLED}>"
+    "WLCLIENT_LOG_LEVEL=${WLCLIENT_LOG_LEVEL_VALUE}"
 )
 target_compile_definitions(${target_wlclient} PRIVATE
     "WLCLIENT_LIBRARY_SHARED=$<BOOL:${WLCLIENT_LIBRARY_SHARED}>"

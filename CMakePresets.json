@@ -19,7 +19,10 @@
 			"cacheVariables": {
 				"CMAKE_BUILD_TYPE": "Debug",
 				"WLCLIENT_LIBRARY_SHARED": "ON",
-				"WLCLIENT_USE_LOGGING": "ON"
+				"WLCLIENT_LOG_LEVEL": {
+					"type": "STRING",
+					"value": "TRACE"
+				}
 			}
 		},
 		{
@@ -29,7 +32,10 @@
 			"cacheVariables": {
 				"CMAKE_BUILD_TYPE": "Release",
 				"WLCLIENT_LIBRARY_SHARED": "OFF",
-				"WLCLIENT_USE_LOGGING": "OFF"
+				"WLCLIENT_LOG_LEVEL": {
+					"type": "STRING",
+					"value": "MUTE"
+				}
 			}
 		},
 
